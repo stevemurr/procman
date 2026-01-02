@@ -235,6 +235,17 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (string, error) 
 	cmd.Stderr = stderrFile
 	cmd.Dir = opts.WorkDir
 
+	// Provide /dev/null as stdin for detached processes
+	// This prevents issues with commands that expect stdin (e.g., 'script')
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDONLY, 0)
+	if err != nil {
+		stdoutFile.Close()
+		stderrFile.Close()
+		os.RemoveAll(jobDir)
+		return "", fmt.Errorf("failed to open /dev/null: %w", err)
+	}
+	cmd.Stdin = devNull
+
 	// Inherit environment and add extras
 	cmd.Env = append(os.Environ(), opts.Env...)
 
@@ -245,11 +256,15 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (string, error) 
 
 	// Start the process
 	if err := cmd.Start(); err != nil {
+		devNull.Close()
 		stdoutFile.Close()
 		stderrFile.Close()
 		os.RemoveAll(jobDir)
 		return "", fmt.Errorf("failed to start process: %w", err)
 	}
+
+	// Close devNull now - the child process has its own copy of the fd
+	devNull.Close()
 
 	job := &Job{
 		ID:        jobID,
