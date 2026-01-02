@@ -1,6 +1,7 @@
 package procman
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -488,53 +489,52 @@ func (m *Manager) Watch(ctx context.Context, jobID string, fn ProgressFunc) erro
 	}
 	defer reader.Close()
 
-	buf := make([]byte, 4096)
-	var lineBuf []byte
+	scanner := bufio.NewScanner(reader)
+	scanner.Split(scanLinesOrCR)
+	scanner.Buffer(make([]byte, 4096), 1024*1024) // 1MB max line length
 
-	for {
+	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		n, err := reader.Read(buf)
-		if n > 0 {
-			lineBuf = append(lineBuf, buf[:n]...)
-
-			// Process complete lines
-			for {
-				idx := -1
-				for i, b := range lineBuf {
-					if b == '\n' {
-						idx = i
-						break
-					}
-				}
-				if idx == -1 {
-					break
-				}
-
-				line := string(lineBuf[:idx])
-				lineBuf = lineBuf[idx+1:]
-
-				if err := fn(line); err != nil {
-					return err
-				}
-			}
-		}
-
-		if err != nil {
-			if err == io.EOF {
-				// Process remaining content
-				if len(lineBuf) > 0 {
-					fn(string(lineBuf))
-				}
-				return nil
-			}
+		if err := fn(scanner.Text()); err != nil {
 			return err
 		}
 	}
+
+	return scanner.Err()
+}
+
+// scanLinesOrCR is a split function for bufio.Scanner that splits on \n, \r\n, or standalone \r.
+// This handles both regular line output and progress bars that use carriage return.
+func scanLinesOrCR(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+
+	for i := 0; i < len(data); i++ {
+		if data[i] == '\n' {
+			return i + 1, data[0:i], nil
+		}
+		if data[i] == '\r' {
+			// Check for \r\n (Windows line ending)
+			if i+1 < len(data) && data[i+1] == '\n' {
+				return i + 2, data[0:i], nil
+			}
+			return i + 1, data[0:i], nil
+		}
+	}
+
+	// If at EOF, return remaining data
+	if atEOF {
+		return len(data), data, nil
+	}
+
+	// Request more data
+	return 0, nil, nil
 }
 
 // Cancel sends SIGTERM to a running process, then SIGKILL after timeout.
